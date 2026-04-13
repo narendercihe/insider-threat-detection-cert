@@ -260,27 +260,52 @@ def main():
 
     log("Building features...")
 
-    build_features = resolve_callable_fuzzy(
-        "src.features",
-        [
-            "build_features",
-            "build_feature_table",
-            "build_daily_features",
-            "engineer_features",
-            "create_feature_table",
-            "extract_features",
-            "make_features",
-            "generate_features",
-            "create_features",
-            "prepare_features",
-            "build_user_features",
-            "build_dataset_features",
-        ],
-        include_keywords=["feature"],
-        exclude_keywords=["plot", "save", "load", "visual", "chart"],
-    )
+features_module = import_module("src.features")
+build_features = resolve_callable_fuzzy(
+    "src.features",
+    [
+        "build_features",
+        "build_feature_table",
+        "build_daily_features",
+        "engineer_features",
+        "create_feature_table",
+        "extract_features",
+        "make_features",
+        "generate_features",
+        "create_features",
+        "prepare_features",
+        "build_user_features",
+        "build_dataset_features",
+        "build_logon_features",
+    ],
+    include_keywords=["feature"],
+    exclude_keywords=["plot", "save", "load", "visual", "chart"],
+)
 
-    feature_df = build_features(datasets)
+feature_fn_name = build_features.__name__
+log(f"Using feature function: {feature_fn_name}")
+
+if isinstance(datasets, dict):
+    # Route correct dataframe based on function name
+    if "logon" in feature_fn_name.lower():
+        if "logon" not in datasets:
+            raise KeyError("Expected 'logon' key in datasets dict, but it was not found.")
+        feature_input = datasets["logon"]
+    elif "device" in feature_fn_name.lower():
+        if "device" not in datasets:
+            raise KeyError("Expected 'device' key in datasets dict, but it was not found.")
+        feature_input = datasets["device"]
+    elif "psychometric" in feature_fn_name.lower():
+        if "psychometric" not in datasets:
+            raise KeyError("Expected 'psychometric' key in datasets dict, but it was not found.")
+        feature_input = datasets["psychometric"]
+    else:
+        # For general feature builders, pass the full dataset dictionary
+        feature_input = datasets
+else:
+    feature_input = datasets
+
+feature_df = build_features(feature_input)
 
     if not isinstance(feature_df, pd.DataFrame):
         raise ValueError("Feature builder did not return a pandas DataFrame.")
