@@ -1,1 +1,1 @@
-# Package initializer
+# Insider threat detection package
