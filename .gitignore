@@ -1,14 +1,15 @@
-# Data
+# Raw and processed data
 data/raw/*
 data/processed/*
 !data/raw/.gitkeep
 !data/processed/.gitkeep
 
 # Outputs
-outputs/figures/*
+outputs/models/*
 outputs/predictions/*
+outputs/tables/*
+!outputs/figures/
 !outputs/figures/.gitkeep
-!outputs/predictions/.gitkeep
 
 # Python
 __pycache__/
@@ -16,10 +17,10 @@ __pycache__/
 *.pyo
 *.pyd
 
-# Jupyter
+# Notebooks
 .ipynb_checkpoints/
 
-# Environments
+# Virtual environments
 venv/
 .venv/
 env/
@@ -28,7 +29,3 @@ env/
 .DS_Store
 Thumbs.db
 .vscode/
-
-# Model artifacts
-*.pkl
-*.joblib
