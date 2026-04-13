@@ -1,15 +1,20 @@
+from __future__ import annotations
 from pathlib import Path
 import pandas as pd
 
-from src.data_loader import load_logon_data, load_psychometric_data
-from src.preprocess import preprocess_logon_data, preprocess_psychometric_data
-from src.features import build_daily_user_features, merge_psychometric_features
-from src.model import train_isolation_forest, save_model
-from src.evaluate import (
-    save_top_anomalies,
-    plot_hour_distribution,
-    plot_top_suspicious_users,
-    print_summary,
+from src.data_loader import load_all_data
+from src.preprocess import preprocess_logon, preprocess_device, preprocess_psychometric, preprocess_users
+from src.features import build_logon_features, build_device_features, build_final_feature_table
+from src.label_builder import build_pseudo_labels
+from src.baseline_iforest import train_iforest, save_iforest_artifacts
+from src.autoencoder_model import train_autoencoder, save_autoencoder_artifacts
+from src.vae_model import train_vae, save_vae_artifacts
+from src.metrics import build_comparison_table
+from src.visualize import (
+    plot_label_distribution,
+    plot_metric_comparison,
+    plot_confusion,
+    plot_score_histogram,
 )
 
 
@@ -17,85 +22,100 @@ BASE_DIR = Path(__file__).resolve().parent
 RAW_DIR = BASE_DIR / "data" / "raw"
 PROCESSED_DIR = BASE_DIR / "data" / "processed"
 FIGURES_DIR = BASE_DIR / "outputs" / "figures"
+MODELS_DIR = BASE_DIR / "outputs" / "models"
 PREDICTIONS_DIR = BASE_DIR / "outputs" / "predictions"
-MODEL_DIR = BASE_DIR / "outputs" / "models"
+TABLES_DIR = BASE_DIR / "outputs" / "tables"
 
 
-def ensure_dirs() -> None:
-    for folder in [PROCESSED_DIR, FIGURES_DIR, PREDICTIONS_DIR, MODEL_DIR]:
+def ensure_dirs():
+    for folder in [PROCESSED_DIR, FIGURES_DIR, MODELS_DIR, PREDICTIONS_DIR, TABLES_DIR]:
         folder.mkdir(parents=True, exist_ok=True)
 
 
-def main() -> None:
+def main():
     ensure_dirs()
 
-    logon_path = RAW_DIR / "logon.csv"
-    psychometric_path = RAW_DIR / "psychometric.csv"
+    print("Loading datasets...")
+    datasets = load_all_data(RAW_DIR)
 
-    print("Loading data...")
-    logon_df = load_logon_data(logon_path)
-
-    psychometric_df = None
-    use_psychometric = psychometric_path.exists()
-
-    if use_psychometric:
-        psychometric_df = load_psychometric_data(psychometric_path)
-        print("psychometric.csv found and loaded.")
-    else:
-        print("psychometric.csv not found. Running project without psychometric data.")
-
-    print("Preprocessing data...")
-    logon_df = preprocess_logon_data(logon_df)
-
-    if use_psychometric and psychometric_df is not None:
-        psychometric_df = preprocess_psychometric_data(psychometric_df)
+    print("Preprocessing datasets...")
+    logon_df = preprocess_logon(datasets["logon"])
+    device_df = preprocess_device(datasets["device"])
+    psychometric_df = preprocess_psychometric(datasets["psychometric"])
+    users_df = preprocess_users(datasets["users"])
 
     print("Building features...")
-    daily_features = build_daily_user_features(logon_df)
+    logon_features = build_logon_features(logon_df)
+    device_features = build_device_features(device_df)
+    feature_df = build_final_feature_table(
+        logon_features=logon_features,
+        device_features=device_features,
+        psychometric_df=psychometric_df,
+        users_df=users_df,
+    )
 
-    if use_psychometric and psychometric_df is not None:
-        final_features = merge_psychometric_features(daily_features, psychometric_df)
-    else:
-        final_features = daily_features.copy()
+    print("Building pseudo labels...")
+    labeled_df = build_pseudo_labels(feature_df)
 
-    processed_path = PROCESSED_DIR / "daily_user_features.csv"
-    final_features.to_csv(processed_path, index=False)
-    print(f"Saved processed features to: {processed_path}")
+    processed_path = PROCESSED_DIR / "final_feature_table_with_labels.csv"
+    labeled_df.to_csv(processed_path, index=False)
+    print(f"Saved processed feature table to: {processed_path}")
 
-    print("Training model...")
-    model, results = train_isolation_forest(final_features)
+    print("Training Isolation Forest...")
+    if_scaler, if_model, if_df = train_iforest(labeled_df, contamination=0.10)
+    save_iforest_artifacts(if_scaler, if_model, MODELS_DIR)
 
-    results_path = PREDICTIONS_DIR / "anomaly_results.csv"
-    results.to_csv(results_path, index=False)
-    print(f"Saved anomaly results to: {results_path}")
+    print("Training Autoencoder...")
+    ae_scaler, ae_model, ae_threshold, ae_df = train_autoencoder(labeled_df)
+    save_autoencoder_artifacts(ae_scaler, ae_model, ae_threshold, MODELS_DIR)
 
-    top_path = PREDICTIONS_DIR / "top_anomalies.csv"
-    top_df = save_top_anomalies(results, top_path, top_n=25)
-    print(f"Saved top anomalies to: {top_path}")
+    print("Training VAE...")
+    vae_scaler, vae_model, vae_threshold, vae_df = train_vae(labeled_df)
+    save_vae_artifacts(vae_scaler, vae_model, vae_threshold, MODELS_DIR)
 
-    model_path = MODEL_DIR / "isolation_forest.joblib"
-    save_model(model, model_path)
-    print(f"Saved model to: {model_path}")
+    print("Combining predictions...")
+    result_df = labeled_df.copy()
+    result_df["iforest_score"] = if_df["iforest_score"]
+    result_df["iforest_pred"] = if_df["iforest_pred"]
+    result_df["ae_score"] = ae_df["ae_score"]
+    result_df["ae_pred"] = ae_df["ae_pred"]
+    result_df["vae_score"] = vae_df["vae_score"]
+    result_df["vae_pred"] = vae_df["vae_pred"]
 
-    print("Generating plots...")
-    plot_hour_distribution(logon_df, FIGURES_DIR / "hour_distribution.png")
-    plot_top_suspicious_users(results, FIGURES_DIR / "top_suspicious_users.png")
+    predictions_path = PREDICTIONS_DIR / "model_predictions.csv"
+    result_df.to_csv(predictions_path, index=False)
+    print(f"Saved predictions to: {predictions_path}")
 
-    print_summary(results)
+    print("Evaluating models...")
+    comparison_table = build_comparison_table(result_df)
+    comparison_path = TABLES_DIR / "model_comparison.csv"
+    comparison_table.to_csv(comparison_path, index=False)
+    print(f"Saved comparison table to: {comparison_path}")
 
-    print("\nTop 10 most suspicious user-day records:")
-    display_cols = [
-        "user",
-        "day",
-        "total_events",
-        "after_hours_events",
-        "unique_pcs",
-        "after_hours_ratio",
-        "anomaly_score",
-    ]
+    print("\n=== Model Comparison ===")
+    print(comparison_table.to_string(index=False))
 
-    available_cols = [col for col in display_cols if col in top_df.columns]
-    print(top_df[available_cols].head(10).to_string(index=False))
+    print("Generating figures...")
+    y_true = result_df["label"].astype(int)
+
+    plot_label_distribution(result_df, FIGURES_DIR / "label_distribution.png")
+    plot_metric_comparison(comparison_table, FIGURES_DIR / "model_comparison.png")
+
+    plot_confusion(y_true, result_df["iforest_pred"], "Isolation Forest Confusion Matrix",
+                   FIGURES_DIR / "iforest_confusion_matrix.png")
+    plot_confusion(y_true, result_df["ae_pred"], "Autoencoder Confusion Matrix",
+                   FIGURES_DIR / "ae_confusion_matrix.png")
+    plot_confusion(y_true, result_df["vae_pred"], "VAE Confusion Matrix",
+                   FIGURES_DIR / "vae_confusion_matrix.png")
+
+    plot_score_histogram(result_df, "iforest_score", "Isolation Forest Score Distribution",
+                         FIGURES_DIR / "iforest_score_distribution.png")
+    plot_score_histogram(result_df, "ae_score", "Autoencoder Reconstruction Error",
+                         FIGURES_DIR / "ae_score_distribution.png")
+    plot_score_histogram(result_df, "vae_score", "VAE Reconstruction Error",
+                         FIGURES_DIR / "vae_score_distribution.png")
+
+    print("Done.")
 
 
 if __name__ == "__main__":
