@@ -1,12 +1,11 @@
+from pathlib import Path
 import json
 import warnings
-import importlib
-from pathlib import Path
 
-import joblib
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import joblib
 
 from sklearn.metrics import (
     accuracy_score,
@@ -15,6 +14,23 @@ from sklearn.metrics import (
     f1_score,
     confusion_matrix,
 )
+
+from src.data_loader import load_all_data
+from src.preprocess import (
+    preprocess_logon,
+    preprocess_device,
+    preprocess_psychometric,
+    preprocess_users,
+)
+from src.features import (
+    build_logon_features,
+    build_device_features,
+    build_final_feature_table,
+)
+from src.label_builder import build_pseudo_labels
+from src.baseline_iforest import train_iforest, save_iforest_artifacts
+from src.autoencoder_model import train_autoencoder, save_autoencoder_artifacts
+from src.vae_model import train_vae
 
 warnings.filterwarnings("ignore")
 
@@ -33,6 +49,7 @@ TABLES_DIR = OUTPUTS_DIR / "tables"
 MODELS_DIR = OUTPUTS_DIR / "models"
 
 ARTIFACTS_DIR = BASE_DIR / "artifacts"
+IFOREST_ARTIFACTS_DIR = ARTIFACTS_DIR / "iforest"
 AE_ARTIFACTS_DIR = ARTIFACTS_DIR / "autoencoder"
 VAE_ARTIFACTS_DIR = ARTIFACTS_DIR / "vae"
 
@@ -42,208 +59,15 @@ for d in [
     PREDICTIONS_DIR,
     TABLES_DIR,
     MODELS_DIR,
+    IFOREST_ARTIFACTS_DIR,
     AE_ARTIFACTS_DIR,
     VAE_ARTIFACTS_DIR,
 ]:
     d.mkdir(parents=True, exist_ok=True)
 
 
-# -----------------------------
-# Helpers
-# -----------------------------
 def log(message: str) -> None:
     print(message, flush=True)
-
-
-def import_module(module_name: str):
-    return importlib.import_module(module_name)
-
-
-def resolve_callable(module_name: str, candidate_names: list[str]):
-    module = import_module(module_name)
-    for name in candidate_names:
-        fn = getattr(module, name, None)
-        if callable(fn):
-            return fn
-    raise AttributeError(
-        f"None of these functions were found in {module_name}: {candidate_names}"
-    )
-
-
-def resolve_callable_fuzzy(
-    module_name: str,
-    candidate_names: list[str],
-    include_keywords: list[str],
-    exclude_keywords: list[str] | None = None,
-):
-    module = import_module(module_name)
-
-    for name in candidate_names:
-        fn = getattr(module, name, None)
-        if callable(fn):
-            return fn
-
-    exclude_keywords = exclude_keywords or []
-    matches = []
-
-    for name in dir(module):
-        if name.startswith("_"):
-            continue
-        obj = getattr(module, name)
-        if not callable(obj):
-            continue
-
-        lname = name.lower()
-        if all(k.lower() in lname for k in include_keywords) and not any(
-            bad.lower() in lname for bad in exclude_keywords
-        ):
-            matches.append((name, obj))
-
-    if len(matches) == 1:
-        log(f"Auto-detected function in {module_name}: {matches[0][0]}")
-        return matches[0][1]
-
-    if len(matches) > 1:
-        preferred = sorted(matches, key=lambda x: len(x[0]))[0]
-        log(f"Auto-detected function in {module_name}: {preferred[0]}")
-        return preferred[1]
-
-    available = [
-        name for name in dir(module)
-        if callable(getattr(module, name, None)) and not name.startswith("_")
-    ]
-    raise AttributeError(
-        f"Could not resolve function in {module_name}. "
-        f"Tried explicit names: {candidate_names}. "
-        f"Available callables: {available}"
-    )
-
-
-def ensure_label_column(df: pd.DataFrame, label_col: str = "label") -> pd.DataFrame:
-    if label_col not in df.columns:
-        raise ValueError(
-            f"Expected '{label_col}' column in labeled dataframe, but it was not found."
-        )
-    return df
-
-
-def get_numeric_feature_columns(df: pd.DataFrame, label_col: str = "label") -> list[str]:
-    exclude = {
-        label_col,
-        "user",
-        "date",
-        "session_id",
-        "pc",
-        "start_time",
-        "end_time",
-        "timestamp",
-    }
-    return [
-        c
-        for c in df.columns
-        if c not in exclude and pd.api.types.is_numeric_dtype(df[c])
-    ]
-
-
-def choose_dataset_input(datasets, fn_name: str):
-    """
-    Route the correct input into a detected function.
-    If the function name is specialized like build_logon_features,
-    pass datasets['logon'] instead of the whole datasets dict.
-    """
-    if not isinstance(datasets, dict):
-        return datasets
-
-    lname = fn_name.lower()
-
-    if "logon" in lname:
-        if "logon" not in datasets:
-            raise KeyError("Expected 'logon' key in datasets dict, but it was not found.")
-        return datasets["logon"]
-
-    if "device" in lname:
-        if "device" not in datasets:
-            raise KeyError("Expected 'device' key in datasets dict, but it was not found.")
-        return datasets["device"]
-
-    if "psychometric" in lname:
-        if "psychometric" not in datasets:
-            raise KeyError("Expected 'psychometric' key in datasets dict, but it was not found.")
-        return datasets["psychometric"]
-
-    return datasets
-
-
-def apply_preprocess(datasets, preprocess_fn):
-    fn_name = preprocess_fn.__name__
-    log(f"Using preprocess function: {fn_name}")
-
-    if not isinstance(datasets, dict):
-        return preprocess_fn(datasets)
-
-    lname = fn_name.lower()
-
-    if "logon" in lname and "logon" in datasets:
-        datasets["logon"] = preprocess_fn(datasets["logon"])
-        return datasets
-
-    if "device" in lname and "device" in datasets:
-        datasets["device"] = preprocess_fn(datasets["device"])
-        return datasets
-
-    if "psychometric" in lname and "psychometric" in datasets:
-        datasets["psychometric"] = preprocess_fn(datasets["psychometric"])
-        return datasets
-
-    return preprocess_fn(datasets)
-
-
-def apply_feature_builder(datasets, build_features_fn):
-    fn_name = build_features_fn.__name__
-    log(f"Using feature function: {fn_name}")
-    feature_input = choose_dataset_input(datasets, fn_name)
-    return build_features_fn(feature_input)
-
-
-def apply_label_builder(feature_df, label_fn):
-    fn_name = label_fn.__name__
-    log(f"Using label function: {fn_name}")
-    return label_fn(feature_df)
-
-
-def normalize_model_output(result, model_name: str) -> dict:
-    out = {
-        "scores": None,
-        "y_pred": None,
-        "threshold": None,
-        "model": None,
-    }
-
-    if isinstance(result, dict):
-        out["scores"] = result.get("scores")
-        out["y_pred"] = result.get("y_pred", result.get("predictions"))
-        out["threshold"] = result.get("threshold")
-        out["model"] = result.get("model")
-        return out
-
-    if isinstance(result, (tuple, list)):
-        if len(result) == 4:
-            out["scores"], out["y_pred"], out["threshold"], out["model"] = result
-            return out
-        if len(result) == 3:
-            a, b, c = result
-            arr_a = np.asarray(a)
-
-            if arr_a.ndim == 1 and set(np.unique(arr_a)).issubset({0, 1}):
-                out["y_pred"], out["scores"], out["model"] = a, b, c
-            else:
-                out["scores"], out["y_pred"], out["threshold"] = a, b, c
-            return out
-        if len(result) == 2:
-            out["y_pred"], out["scores"] = result
-            return out
-
-    raise ValueError(f"Unsupported output format from {model_name}: {type(result)}")
 
 
 def evaluate_predictions(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
@@ -263,8 +87,8 @@ def save_confusion_matrix_plot(cm: np.ndarray, title: str, save_path: Path) -> N
     plt.title(title)
     plt.colorbar()
     tick_marks = np.arange(2)
-    plt.xticks(tick_marks, ["Normal", "Anomaly"])
-    plt.yticks(tick_marks, ["Normal", "Anomaly"])
+    plt.xticks(tick_marks, ["Normal", "Suspicious"])
+    plt.yticks(tick_marks, ["Normal", "Suspicious"])
     plt.xlabel("Predicted")
     plt.ylabel("Actual")
 
@@ -296,143 +120,47 @@ def save_predictions_file(
     df: pd.DataFrame,
     y_true: np.ndarray,
     y_pred: np.ndarray,
-    scores,
+    scores: np.ndarray | None,
     model_name: str,
     save_path: Path,
 ) -> None:
     temp = df.copy()
     temp["true_label"] = y_true
-    temp[f"{model_name.lower()}_pred"] = y_pred
+    temp[f"{model_name}_pred"] = y_pred
     if scores is not None:
-        temp[f"{model_name.lower()}_score"] = np.asarray(scores)
+        temp[f"{model_name}_score"] = scores
     temp.to_csv(save_path, index=False)
 
 
-def run_model_with_fallback(train_fn, labeled_df, feature_cols, label_col, model_dir=None):
-    """
-    Flexible caller for inconsistent project module APIs.
-    Tries:
-    1) dataframe + feature_cols + label_col + model_dir
-    2) dataframe + feature_cols + label_col
-    3) dataframe + model_dir
-    4) dataframe only
-    5) numeric X + model_dir
-    6) numeric X only
-    """
-    X = labeled_df[feature_cols].fillna(0).astype(float).values
-
-    attempts = []
-
-    if model_dir is not None:
-        attempts.extend([
-            lambda: train_fn(
-                labeled_df,
-                feature_cols=feature_cols,
-                label_col=label_col,
-                model_dir=str(model_dir),
-            ),
-            lambda: train_fn(
-                labeled_df,
-                feature_cols=feature_cols,
-                label_col=label_col,
-            ),
-            lambda: train_fn(
-                labeled_df,
-                model_dir=str(model_dir),
-            ),
-        ])
-    else:
-        attempts.extend([
-            lambda: train_fn(
-                labeled_df,
-                feature_cols=feature_cols,
-                label_col=label_col,
-            ),
-            lambda: train_fn(
-                labeled_df,
-            ),
-        ])
-
-    attempts.append(lambda: train_fn(labeled_df))
-
-    if model_dir is not None:
-        attempts.append(lambda: train_fn(X, model_dir=str(model_dir)))
-    attempts.append(lambda: train_fn(X))
-
-    last_error = None
-    for attempt in attempts:
-        try:
-            return attempt()
-        except TypeError as e:
-            last_error = e
-            continue
-
-    raise TypeError(f"Could not call training function with any supported signature: {last_error}")
-
-
-# -----------------------------
-# Main pipeline
-# -----------------------------
 def main():
+    # -----------------------------
+    # Load raw data
+    # -----------------------------
     log("Loading datasets...")
+    datasets = load_all_data(RAW_DIR)
 
-    load_all_data = resolve_callable_fuzzy(
-        "src.data_loader",
-        ["load_all_data", "load_data", "load_raw_data"],
-        include_keywords=["load"],
-        exclude_keywords=["save", "plot"],
-    )
-
-    datasets = load_all_data(str(RAW_DIR))
-    if datasets is None:
-        raise ValueError("Data loader returned None. Check src/data_loader.py")
-
+    # -----------------------------
+    # Preprocess
+    # -----------------------------
     log("Preprocessing datasets...")
+    logon_df = preprocess_logon(datasets["logon"])
+    device_df = preprocess_device(datasets["device"])
+    psychometric_df = preprocess_psychometric(datasets["psychometric"])
+    users_df = preprocess_users(datasets.get("users"))
 
-    try:
-        preprocess_fn = resolve_callable_fuzzy(
-            "src.preprocess",
-            [
-                "preprocess_all_data",
-                "preprocess_data",
-                "preprocess_datasets",
-                "preprocess_logon",
-                "preprocess_device",
-                "preprocess_psychometric",
-            ],
-            include_keywords=["preprocess"],
-            exclude_keywords=["save", "plot"],
-        )
-        datasets = apply_preprocess(datasets, preprocess_fn)
-    except Exception as e:
-        log(f"Preprocessing skipped: {e}")
-
+    # -----------------------------
+    # Build features
+    # -----------------------------
     log("Building features...")
+    logon_features = build_logon_features(logon_df)
+    device_features = build_device_features(device_df)
 
-    build_features = resolve_callable_fuzzy(
-        "src.features",
-        [
-            "build_features",
-            "build_feature_table",
-            "build_daily_features",
-            "engineer_features",
-            "create_feature_table",
-            "extract_features",
-            "make_features",
-            "generate_features",
-            "create_features",
-            "prepare_features",
-            "build_user_features",
-            "build_dataset_features",
-            "build_logon_features",
-            "build_device_features",
-            "build_psychometric_features",
-        ],
-        include_keywords=["feature"],
-        exclude_keywords=["plot", "save", "load", "visual", "chart"],
+    feature_df = build_final_feature_table(
+        logon_features=logon_features,
+        device_features=device_features,
+        psychometric_df=psychometric_df,
+        users_df=users_df,
     )
-
-    feature_df = apply_feature_builder(datasets, build_features)
 
     if not isinstance(feature_df, pd.DataFrame):
         raise ValueError("Feature builder did not return a pandas DataFrame.")
@@ -444,71 +172,30 @@ def main():
     feature_df.to_csv(feature_table_path, index=False)
     log(f"Saved feature table to: {feature_table_path}")
 
+    # -----------------------------
+    # Build pseudo labels
+    # -----------------------------
     log("Building proxy labels...")
+    labeled_df = build_pseudo_labels(feature_df)
 
-    label_fn = resolve_callable_fuzzy(
-        "src.labels",
-        [
-            "build_proxy_labels",
-            "create_proxy_labels",
-            "generate_proxy_labels",
-            "assign_proxy_labels",
-            "apply_proxy_labels",
-            "build_labels",
-            "create_labels",
-            "generate_labels",
-            "make_labels",
-        ],
-        include_keywords=["label"],
-        exclude_keywords=["plot", "save", "load"],
-    )
-
-    labeled_df = apply_label_builder(feature_df, label_fn)
-
-    if not isinstance(labeled_df, pd.DataFrame):
-        raise ValueError("Label builder did not return a pandas DataFrame.")
-
-    labeled_df = ensure_label_column(labeled_df, label_col="label")
+    if "label" not in labeled_df.columns:
+        raise ValueError("Label column was not created.")
 
     labeled_feature_table_path = PROCESSED_DIR / "final_feature_table_with_labels.csv"
     labeled_df.to_csv(labeled_feature_table_path, index=False)
     log(f"Saved labeled feature table to: {labeled_feature_table_path}")
 
-    feature_cols = get_numeric_feature_columns(labeled_df, label_col="label")
-    if not feature_cols:
-        raise ValueError("No numeric feature columns found for modeling.")
-
     y_true = labeled_df["label"].astype(int).values
     results_summary = []
 
-    # -------------------------
+    # -----------------------------
     # Isolation Forest
-    # -------------------------
+    # -----------------------------
     log("Training Isolation Forest...")
+    if_scaler, if_model, if_result_df = train_iforest(labeled_df)
 
-    train_iforest = resolve_callable_fuzzy(
-        "src.baseline_iforest",
-        [
-            "train_isolation_forest",
-            "run_isolation_forest",
-            "train_iforest",
-            "fit_isolation_forest",
-            "build_isolation_forest",
-        ],
-        include_keywords=["forest"],
-        exclude_keywords=["plot", "save", "load"],
-    )
-
-    iforest_result = run_model_with_fallback(
-        train_fn=train_iforest,
-        labeled_df=labeled_df,
-        feature_cols=feature_cols,
-        label_col="label",
-        model_dir=None,
-    )
-
-    iforest_out = normalize_model_output(iforest_result, "Isolation Forest")
-    iforest_y_pred = np.asarray(iforest_out["y_pred"]).astype(int)
+    iforest_y_pred = if_result_df["iforest_pred"].astype(int).values
+    iforest_scores = if_result_df["iforest_score"].astype(float).values
 
     iforest_metrics = evaluate_predictions(y_true, iforest_y_pred)
     results_summary.append(
@@ -518,7 +205,7 @@ def main():
             "precision": iforest_metrics["precision"],
             "recall": iforest_metrics["recall"],
             "f1": iforest_metrics["f1"],
-            "threshold": iforest_out["threshold"],
+            "threshold": np.nan,
         }
     )
 
@@ -526,7 +213,7 @@ def main():
         labeled_df,
         y_true,
         iforest_y_pred,
-        iforest_out["scores"],
+        iforest_scores,
         "iforest",
         PREDICTIONS_DIR / "iforest_predictions.csv",
     )
@@ -537,40 +224,19 @@ def main():
         FIGURES_DIR / "iforest_confusion_matrix.png",
     )
 
-    if iforest_out["model"] is not None:
-        joblib.dump(iforest_out["model"], MODELS_DIR / "isolation_forest.joblib")
+    save_iforest_artifacts(if_scaler, if_model, IFOREST_ARTIFACTS_DIR)
 
     with open(TABLES_DIR / "iforest_metrics.json", "w") as f:
         json.dump(iforest_metrics, f, indent=2)
 
-    # -------------------------
+    # -----------------------------
     # Autoencoder
-    # -------------------------
+    # -----------------------------
     log("Training Autoencoder...")
+    ae_scaler, ae_model, ae_threshold, ae_result_df = train_autoencoder(labeled_df)
 
-    train_ae = resolve_callable_fuzzy(
-        "src.autoencoder_model",
-        [
-            "train_autoencoder",
-            "run_autoencoder",
-            "fit_autoencoder",
-            "train_ae",
-            "build_autoencoder",
-        ],
-        include_keywords=["autoencoder"],
-        exclude_keywords=["plot", "save", "load"],
-    )
-
-    ae_result = run_model_with_fallback(
-        train_fn=train_ae,
-        labeled_df=labeled_df,
-        feature_cols=feature_cols,
-        label_col="label",
-        model_dir=AE_ARTIFACTS_DIR,
-    )
-
-    ae_out = normalize_model_output(ae_result, "Autoencoder")
-    ae_y_pred = np.asarray(ae_out["y_pred"]).astype(int)
+    ae_y_pred = ae_result_df["ae_pred"].astype(int).values
+    ae_scores = ae_result_df["ae_score"].astype(float).values
 
     ae_metrics = evaluate_predictions(y_true, ae_y_pred)
     results_summary.append(
@@ -580,7 +246,7 @@ def main():
             "precision": ae_metrics["precision"],
             "recall": ae_metrics["recall"],
             "f1": ae_metrics["f1"],
-            "threshold": ae_out["threshold"],
+            "threshold": float(ae_threshold),
         }
     )
 
@@ -588,7 +254,7 @@ def main():
         labeled_df,
         y_true,
         ae_y_pred,
-        ae_out["scores"],
+        ae_scores,
         "autoencoder",
         PREDICTIONS_DIR / "autoencoder_predictions.csv",
     )
@@ -599,26 +265,30 @@ def main():
         FIGURES_DIR / "autoencoder_confusion_matrix.png",
     )
 
+    save_autoencoder_artifacts(ae_scaler, ae_model, ae_threshold, AE_ARTIFACTS_DIR)
+
     with open(TABLES_DIR / "autoencoder_metrics.json", "w") as f:
         json.dump(ae_metrics, f, indent=2)
 
-    # -------------------------
+    # -----------------------------
     # VAE
-    # -------------------------
+    # -----------------------------
     log("Training VAE...")
+    feature_cols = [
+        c for c in labeled_df.columns
+        if c not in {"label", "user", "day"}
+        and pd.api.types.is_numeric_dtype(labeled_df[c])
+    ]
 
-    train_vae = resolve_callable("src.vae_model", ["train_vae"])
-
-    vae_result = run_model_with_fallback(
-        train_fn=train_vae,
+    vae_scores, vae_y_pred, vae_threshold, _ = train_vae(
         labeled_df=labeled_df,
         feature_cols=feature_cols,
         label_col="label",
-        model_dir=VAE_ARTIFACTS_DIR,
+        model_dir=str(VAE_ARTIFACTS_DIR),
     )
 
-    vae_out = normalize_model_output(vae_result, "VAE")
-    vae_y_pred = np.asarray(vae_out["y_pred"]).astype(int)
+    vae_y_pred = np.asarray(vae_y_pred).astype(int)
+    vae_scores = np.asarray(vae_scores).astype(float)
 
     vae_metrics = evaluate_predictions(y_true, vae_y_pred)
     results_summary.append(
@@ -628,7 +298,7 @@ def main():
             "precision": vae_metrics["precision"],
             "recall": vae_metrics["recall"],
             "f1": vae_metrics["f1"],
-            "threshold": vae_out["threshold"],
+            "threshold": float(vae_threshold),
         }
     )
 
@@ -636,7 +306,7 @@ def main():
         labeled_df,
         y_true,
         vae_y_pred,
-        vae_out["scores"],
+        vae_scores,
         "vae",
         PREDICTIONS_DIR / "vae_predictions.csv",
     )
@@ -650,14 +320,10 @@ def main():
     with open(TABLES_DIR / "vae_metrics.json", "w") as f:
         json.dump(vae_metrics, f, indent=2)
 
-    # -------------------------
+    # -----------------------------
     # Final comparison
-    # -------------------------
+    # -----------------------------
     comparison_df = pd.DataFrame(results_summary)
-    comparison_df = comparison_df[
-        ["model", "accuracy", "precision", "recall", "f1", "threshold"]
-    ]
-
     comparison_csv_path = TABLES_DIR / "model_comparison.csv"
     comparison_df.to_csv(comparison_csv_path, index=False)
 
