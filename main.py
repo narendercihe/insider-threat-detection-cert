@@ -8,7 +8,7 @@ from src.features import build_logon_features, build_device_features, build_fina
 from src.label_builder import build_pseudo_labels
 from src.baseline_iforest import train_iforest, save_iforest_artifacts
 from src.autoencoder_model import train_autoencoder, save_autoencoder_artifacts
-from src.vae_model import train_vae, save_vae_artifacts
+from src.vae_model import train_vae
 from src.metrics import build_comparison_table
 from src.visualize import (
     plot_label_distribution,
