@@ -1,42 +1,31 @@
 from pathlib import Path
+from typing import Optional
 import pandas as pd
 
 
-def load_logon_data(path: str | Path) -> pd.DataFrame:
-    """
-    Load CERT logon data.
-    Expected columns:
-    id, date, user, pc, activity
-    """
-    path = Path(path)
+def _safe_read_csv(path: Path) -> Optional[pd.DataFrame]:
     if not path.exists():
-        raise FileNotFoundError(f"logon file not found: {path}")
-
-    df = pd.read_csv(path)
-
-    required_cols = {"id", "date", "user", "pc", "activity"}
-    missing = required_cols - set(df.columns)
-    if missing:
-        raise ValueError(f"logon.csv is missing columns: {missing}")
-
-    return df
+        return None
+    return pd.read_csv(path)
 
 
-def load_psychometric_data(path: str | Path) -> pd.DataFrame:
-    """
-    Load psychometric data.
-    Expected columns:
-    employee_name, user_id, O, C, E, A, N
-    """
-    path = Path(path)
-    if not path.exists():
-        raise FileNotFoundError(f"psychometric file not found: {path}")
+def load_all_data(raw_dir: str | Path) -> dict[str, Optional[pd.DataFrame]]:
+    raw_dir = Path(raw_dir)
 
-    df = pd.read_csv(path)
+    data = {
+        "logon": _safe_read_csv(raw_dir / "logon.csv"),
+        "device": _safe_read_csv(raw_dir / "device.csv"),
+        "psychometric": _safe_read_csv(raw_dir / "psychometric.csv"),
+        "users": _safe_read_csv(raw_dir / "users.csv"),
+    }
 
-    required_cols = {"employee_name", "user_id", "O", "C", "E", "A", "N"}
-    missing = required_cols - set(df.columns)
-    if missing:
-        raise ValueError(f"psychometric.csv is missing columns: {missing}")
+    if data["logon"] is None:
+        raise FileNotFoundError(f"logon.csv not found in {raw_dir}")
 
-    return df
+    if data["device"] is None:
+        raise FileNotFoundError(f"device.csv not found in {raw_dir}")
+
+    if data["psychometric"] is None:
+        raise FileNotFoundError(f"psychometric.csv not found in {raw_dir}")
+
+    return data
