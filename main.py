@@ -20,9 +20,6 @@ from sklearn.metrics import (
 warnings.filterwarnings("ignore")
 
 
-# -----------------------------
-# Paths
-# -----------------------------
 BASE_DIR = Path(__file__).resolve().parent
 RAW_DIR = BASE_DIR / "data" / "raw"
 PROCESSED_DIR = BASE_DIR / "data" / "processed"
@@ -49,24 +46,68 @@ for d in [
     d.mkdir(parents=True, exist_ok=True)
 
 
-# -----------------------------
-# Utilities
-# -----------------------------
 def log(message: str) -> None:
     print(message, flush=True)
 
 
+def import_module(module_name: str):
+    return importlib.import_module(module_name)
+
+
 def resolve_callable(module_name: str, candidate_names: list[str]):
-    """
-    Import module and return the first function found from candidate_names.
-    """
-    module = importlib.import_module(module_name)
+    module = import_module(module_name)
     for name in candidate_names:
         fn = getattr(module, name, None)
         if callable(fn):
             return fn
     raise AttributeError(
         f"None of these functions were found in {module_name}: {candidate_names}"
+    )
+
+
+def resolve_callable_fuzzy(
+    module_name: str,
+    candidate_names: list[str],
+    include_keywords: list[str],
+    exclude_keywords: list[str] | None = None,
+):
+    module = import_module(module_name)
+
+    for name in candidate_names:
+        fn = getattr(module, name, None)
+        if callable(fn):
+            return fn
+
+    exclude_keywords = exclude_keywords or []
+    callables = []
+
+    for name in dir(module):
+        if name.startswith("_"):
+            continue
+        obj = getattr(module, name)
+        if not callable(obj):
+            continue
+
+        lname = name.lower()
+        if all(k.lower() in lname for k in include_keywords) and not any(
+            bad.lower() in lname for bad in exclude_keywords
+        ):
+            callables.append((name, obj))
+
+    if len(callables) == 1:
+        log(f"Auto-detected function in {module_name}: {callables[0][0]}")
+        return callables[0][1]
+
+    if len(callables) > 1:
+        preferred = sorted(callables, key=lambda x: len(x[0]))[0]
+        log(f"Auto-detected function in {module_name}: {preferred[0]}")
+        return preferred[1]
+
+    available = [name for name in dir(module) if callable(getattr(module, name, None)) and not name.startswith("_")]
+    raise AttributeError(
+        f"Could not resolve function in {module_name}. "
+        f"Tried explicit names: {candidate_names}. "
+        f"Available callables: {available}"
     )
 
 
@@ -97,12 +138,6 @@ def get_numeric_feature_columns(df: pd.DataFrame, label_col: str = "label") -> l
 
 
 def normalize_model_output(result, model_name: str) -> dict:
-    """
-    Normalize outputs from different model modules.
-    Supported:
-      - dict with keys like y_pred / scores / threshold / model
-      - tuple/list in common orders
-    """
     out = {
         "scores": None,
         "y_pred": None,
@@ -112,22 +147,19 @@ def normalize_model_output(result, model_name: str) -> dict:
 
     if isinstance(result, dict):
         out["scores"] = result.get("scores")
-        out["y_pred"] = result.get("y_pred") or result.get("predictions")
+        out["y_pred"] = result.get("y_pred", result.get("predictions"))
         out["threshold"] = result.get("threshold")
         out["model"] = result.get("model")
         return out
 
     if isinstance(result, (tuple, list)):
         if len(result) == 4:
-            # Common form: scores, y_pred, threshold, model
             out["scores"], out["y_pred"], out["threshold"], out["model"] = result
             return out
         if len(result) == 3:
-            # Common form: y_pred, scores, model OR scores, y_pred, threshold
             a, b, c = result
-
-            # Heuristic
-            if np.asarray(a).ndim == 1 and set(np.unique(np.asarray(a))).issubset({0, 1}):
+            arr_a = np.asarray(a)
+            if arr_a.ndim == 1 and set(np.unique(arr_a)).issubset({0, 1}):
                 out["y_pred"], out["scores"], out["model"] = a, b, c
             else:
                 out["scores"], out["y_pred"], out["threshold"] = a, b, c
@@ -201,15 +233,13 @@ def save_predictions_file(
     temp.to_csv(save_path, index=False)
 
 
-# -----------------------------
-# Main pipeline
-# -----------------------------
 def main():
     log("Loading datasets...")
 
-    load_all_data = resolve_callable(
+    load_all_data = resolve_callable_fuzzy(
         "src.data_loader",
         ["load_all_data", "load_data", "load_raw_data"],
+        include_keywords=["load"],
     )
 
     datasets = load_all_data(str(RAW_DIR))
@@ -218,11 +248,11 @@ def main():
 
     log("Preprocessing datasets...")
 
-    # Optional preprocess step
     try:
-        preprocess_fn = resolve_callable(
+        preprocess_fn = resolve_callable_fuzzy(
             "src.preprocess",
             ["preprocess_all_data", "preprocess_data", "preprocess_datasets"],
+            include_keywords=["preprocess"],
         )
         datasets = preprocess_fn(datasets)
     except Exception:
@@ -230,7 +260,7 @@ def main():
 
     log("Building features...")
 
-    build_features = resolve_callable(
+    build_features = resolve_callable_fuzzy(
         "src.features",
         [
             "build_features",
@@ -238,8 +268,18 @@ def main():
             "build_daily_features",
             "engineer_features",
             "create_feature_table",
+            "extract_features",
+            "make_features",
+            "generate_features",
+            "create_features",
+            "prepare_features",
+            "build_user_features",
+            "build_dataset_features",
         ],
+        include_keywords=["feature"],
+        exclude_keywords=["plot", "save", "load", "visual", "chart"],
     )
+
     feature_df = build_features(datasets)
 
     if not isinstance(feature_df, pd.DataFrame):
@@ -254,7 +294,7 @@ def main():
 
     log("Building proxy labels...")
 
-    label_fn = resolve_callable(
+    label_fn = resolve_callable_fuzzy(
         "src.labels",
         [
             "build_proxy_labels",
@@ -262,8 +302,15 @@ def main():
             "generate_proxy_labels",
             "assign_proxy_labels",
             "apply_proxy_labels",
+            "make_labels",
+            "build_labels",
+            "generate_labels",
+            "create_labels",
         ],
+        include_keywords=["label"],
+        exclude_keywords=["plot", "save", "load"],
     )
+
     labeled_df = label_fn(feature_df)
 
     if not isinstance(labeled_df, pd.DataFrame):
@@ -280,21 +327,21 @@ def main():
         raise ValueError("No numeric feature columns found for modeling.")
 
     y_true = labeled_df["label"].astype(int).values
-
     results_summary = []
 
-    # -------------------------
-    # Isolation Forest
-    # -------------------------
     log("Training Isolation Forest...")
-    train_iforest = resolve_callable(
+
+    train_iforest = resolve_callable_fuzzy(
         "src.baseline_iforest",
         [
             "train_isolation_forest",
             "run_isolation_forest",
             "train_iforest",
             "fit_isolation_forest",
+            "build_isolation_forest",
         ],
+        include_keywords=["forest"],
+        exclude_keywords=["plot", "save", "load"],
     )
 
     iforest_result = train_iforest(labeled_df, feature_cols=feature_cols, label_col="label")
@@ -334,18 +381,19 @@ def main():
     with open(TABLES_DIR / "iforest_metrics.json", "w") as f:
         json.dump(iforest_metrics, f, indent=2)
 
-    # -------------------------
-    # Autoencoder
-    # -------------------------
     log("Training Autoencoder...")
-    train_ae = resolve_callable(
+
+    train_ae = resolve_callable_fuzzy(
         "src.autoencoder_model",
         [
             "train_autoencoder",
             "run_autoencoder",
             "fit_autoencoder",
             "train_ae",
+            "build_autoencoder",
         ],
+        include_keywords=["autoencoder"],
+        exclude_keywords=["plot", "save", "load"],
     )
 
     ae_result = train_ae(
@@ -387,14 +435,9 @@ def main():
     with open(TABLES_DIR / "autoencoder_metrics.json", "w") as f:
         json.dump(ae_metrics, f, indent=2)
 
-    # -------------------------
-    # VAE
-    # -------------------------
     log("Training VAE...")
-    train_vae = resolve_callable(
-        "src.vae_model",
-        ["train_vae"],
-    )
+
+    train_vae = resolve_callable("src.vae_model", ["train_vae"])
 
     vae_result = train_vae(
         labeled_df,
@@ -435,9 +478,6 @@ def main():
     with open(TABLES_DIR / "vae_metrics.json", "w") as f:
         json.dump(vae_metrics, f, indent=2)
 
-    # -------------------------
-    # Final comparison table
-    # -------------------------
     comparison_df = pd.DataFrame(results_summary)
     comparison_df = comparison_df[
         ["model", "accuracy", "precision", "recall", "f1", "threshold"]
@@ -446,8 +486,11 @@ def main():
     comparison_csv_path = TABLES_DIR / "model_comparison.csv"
     comparison_df.to_csv(comparison_csv_path, index=False)
 
-    comparison_xlsx_path = TABLES_DIR / "model_comparison.xlsx"
-    comparison_df.to_excel(comparison_xlsx_path, index=False)
+    try:
+        comparison_xlsx_path = TABLES_DIR / "model_comparison.xlsx"
+        comparison_df.to_excel(comparison_xlsx_path, index=False)
+    except Exception:
+        comparison_xlsx_path = None
 
     save_metric_comparison_plot(
         comparison_df,
@@ -458,7 +501,8 @@ def main():
     log(f"Feature table: {feature_table_path}")
     log(f"Labeled feature table: {labeled_feature_table_path}")
     log(f"Comparison CSV: {comparison_csv_path}")
-    log(f"Comparison Excel: {comparison_xlsx_path}")
+    if comparison_xlsx_path:
+        log(f"Comparison Excel: {comparison_xlsx_path}")
     log(f"Figures folder: {FIGURES_DIR}")
     log(f"Predictions folder: {PREDICTIONS_DIR}")
 
