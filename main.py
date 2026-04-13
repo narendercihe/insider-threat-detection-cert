@@ -308,6 +308,68 @@ def save_predictions_file(
     temp.to_csv(save_path, index=False)
 
 
+def run_model_with_fallback(train_fn, labeled_df, feature_cols, label_col, model_dir=None):
+    """
+    Flexible caller for inconsistent project module APIs.
+    Tries:
+    1) dataframe + feature_cols + label_col + model_dir
+    2) dataframe + feature_cols + label_col
+    3) dataframe + model_dir
+    4) dataframe only
+    5) numeric X + model_dir
+    6) numeric X only
+    """
+    X = labeled_df[feature_cols].fillna(0).astype(float).values
+
+    attempts = []
+
+    if model_dir is not None:
+        attempts.extend([
+            lambda: train_fn(
+                labeled_df,
+                feature_cols=feature_cols,
+                label_col=label_col,
+                model_dir=str(model_dir),
+            ),
+            lambda: train_fn(
+                labeled_df,
+                feature_cols=feature_cols,
+                label_col=label_col,
+            ),
+            lambda: train_fn(
+                labeled_df,
+                model_dir=str(model_dir),
+            ),
+        ])
+    else:
+        attempts.extend([
+            lambda: train_fn(
+                labeled_df,
+                feature_cols=feature_cols,
+                label_col=label_col,
+            ),
+            lambda: train_fn(
+                labeled_df,
+            ),
+        ])
+
+    attempts.append(lambda: train_fn(labeled_df))
+
+    if model_dir is not None:
+        attempts.append(lambda: train_fn(X, model_dir=str(model_dir)))
+    attempts.append(lambda: train_fn(X))
+
+    last_error = None
+    for attempt in attempts:
+        try:
+            return attempt()
+        except TypeError as e:
+            last_error = e
+            continue
+
+    raise TypeError(f"Could not call training function with any supported signature: {last_error}")
+
+
 # -----------------------------
 # Main pipeline
 # -----------------------------
@@ -437,11 +499,14 @@ def main():
         exclude_keywords=["plot", "save", "load"],
     )
 
-    iforest_result = train_iforest(
-        labeled_df,
+    iforest_result = run_model_with_fallback(
+        train_fn=train_iforest,
+        labeled_df=labeled_df,
         feature_cols=feature_cols,
         label_col="label",
+        model_dir=None,
     )
+
     iforest_out = normalize_model_output(iforest_result, "Isolation Forest")
     iforest_y_pred = np.asarray(iforest_out["y_pred"]).astype(int)
 
@@ -496,12 +561,14 @@ def main():
         exclude_keywords=["plot", "save", "load"],
     )
 
-    ae_result = train_ae(
-        labeled_df,
+    ae_result = run_model_with_fallback(
+        train_fn=train_ae,
+        labeled_df=labeled_df,
         feature_cols=feature_cols,
         label_col="label",
-        model_dir=str(AE_ARTIFACTS_DIR),
+        model_dir=AE_ARTIFACTS_DIR,
     )
+
     ae_out = normalize_model_output(ae_result, "Autoencoder")
     ae_y_pred = np.asarray(ae_out["y_pred"]).astype(int)
 
@@ -542,12 +609,14 @@ def main():
 
     train_vae = resolve_callable("src.vae_model", ["train_vae"])
 
-    vae_result = train_vae(
-        labeled_df,
+    vae_result = run_model_with_fallback(
+        train_fn=train_vae,
+        labeled_df=labeled_df,
         feature_cols=feature_cols,
         label_col="label",
-        model_dir=str(VAE_ARTIFACTS_DIR),
+        model_dir=VAE_ARTIFACTS_DIR,
     )
+
     vae_out = normalize_model_output(vae_result, "VAE")
     vae_y_pred = np.asarray(vae_out["y_pred"]).astype(int)
 
