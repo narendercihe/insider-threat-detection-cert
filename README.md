@@ -1,196 +1,106 @@
-# 🔍 Insider Threat Detection using CERT Dataset
+# Insider Threat Detection using CERT Dataset
 
-## 📌 Overview
+## Overview
 
-This project implements an **unsupervised machine learning pipeline** to detect potential insider threats using the **CERT Insider Threat Dataset**.
-It analyzes user logon behavior and (optionally) psychometric traits to identify anomalous activity patterns.
+This project builds a comparative insider threat detection pipeline using the CERT dataset. It combines user logon behavior, device activity, psychometric traits, and optional user metadata to detect suspicious user-day patterns.
 
-The system is designed to detect:
+The project compares three models:
 
-* Unusual login timings (after-hours access)
-* Abnormal system usage patterns
-* Suspicious user-day behavioral anomalies
+- Isolation Forest
+- Autoencoder (AE)
+- Variational Autoencoder (VAE)
 
----
+## Objective
 
-## 🎯 Objectives
+The objective is to identify suspicious insider-like behavior and compare anomaly detection models using:
 
-* Build a complete **data pipeline** from raw logs to anomaly detection
-* Engineer meaningful behavioral features from logon data
-* Apply **Isolation Forest** for anomaly detection
-* Generate interpretable outputs and visualizations
-* Create a **clean, reproducible ML project structure**
+- Accuracy
+- Precision
+- Recall
+- F1-score
 
----
+## Dataset Used
 
-## 📂 Dataset
+Place these files in `data/raw/`:
 
-This project uses the **CERT Insider Threat Dataset**, specifically:
+- `logon.csv`
+- `device.csv`
+- `psychometric.csv`
+- `users.csv` (optional but recommended)
 
-* `logon.csv` → user login/logout activity
-* `psychometric.csv` → personality traits (optional)
+## Project Workflow
 
-> ⚠️ Note: Dataset files are **not included** in this repository due to size constraints.
+1. Load and preprocess datasets
+2. Create daily behavioral features
+3. Merge psychometric and optional user data
+4. Generate pseudo labels using behavioral rules
+5. Train Isolation Forest, Autoencoder, and VAE
+6. Evaluate models with classification metrics
+7. Save figures, predictions, and comparison tables
 
----
+## Features Used
 
-## 🏗️ Project Structure
+### Logon features
+- total_events
+- total_logons
+- total_logoffs
+- unique_pcs
+- after_hours_events
+- weekend_events
+- first_hour
+- last_hour
+- activity_span
+- after_hours_ratio
+- weekend_ratio
 
-```text
-insider-threat-detection-cert/
-├── data/
-│   ├── raw/                # Input CSV files (not tracked)
-│   └── processed/          # Feature-engineered data
-├── outputs/
-│   ├── figures/            # Visualizations
-│   ├── predictions/        # Model results
-│   └── models/             # Saved models
-├── src/
-│   ├── data_loader.py
-│   ├── preprocess.py
-│   ├── features.py
-│   ├── model.py
-│   └── evaluate.py
-├── main.py                 # Entry point
-├── requirements.txt
-├── .gitignore
-└── README.md
-```
+### Device features
+- device_events
+- after_hours_device_events
+- weekend_device_events
+- unique_device_pcs
+- connect_like_events
+- after_hours_device_ratio
+- weekend_device_ratio
 
----
+### Historical features
+- user_avg_total_events
+- user_avg_after_hours
+- user_avg_unique_pcs
+- user_avg_device_events
+- deviation_total_events
+- deviation_after_hours
+- deviation_unique_pcs
+- deviation_device_events
 
-## ⚙️ Installation
+### Psychometric features
+- O, C, E, A, N
 
-### 1. Clone the repository
+## Pseudo Labeling
 
-```bash
-git clone https://github.com/narendercihe/insider-threat-detection-cert.git
-cd insider-threat-detection-cert
-```
+Because official answer labels were not available in the chosen subset, pseudo labels are generated from strong behavioral rules such as:
 
-### 2. Install dependencies
+- high after-hours activity
+- unusual device usage
+- multi-PC access
+- weekend activity with device events
+- large deviation from personal baseline
+
+A user-day is marked suspicious when multiple such conditions are met.
+
+## Models
+
+### 1. Isolation Forest
+Used as a baseline anomaly detection method.
+
+### 2. Autoencoder
+Learns normal behavioral patterns and flags records with high reconstruction error.
+
+### 3. Variational Autoencoder (VAE)
+Probabilistic version of autoencoder used for anomaly detection via reconstruction error.
+
+## How to Run
+
+Install dependencies:
 
 ```bash
 pip install -r requirements.txt
-```
-
----
-
-## ▶️ Usage
-
-### Step 1: Place dataset files
-
-Put your dataset files inside:
-
-```text
-data/raw/
-```
-
-Required:
-
-* `logon.csv`
-
-Optional:
-
-* `psychometric.csv`
-
----
-
-### Step 2: Run the project
-
-```bash
-python main.py
-```
-
----
-
-## 📊 Outputs
-
-After running, the project generates:
-
-### 📁 Processed Data
-
-* `data/processed/daily_user_features.csv`
-
-### 📁 Predictions
-
-* `outputs/predictions/anomaly_results.csv`
-* `outputs/predictions/top_anomalies.csv`
-
-### 📁 Model
-
-* `outputs/models/isolation_forest.joblib`
-
-### 📁 Visualizations
-
-* `outputs/figures/hour_distribution.png`
-* `outputs/figures/top_suspicious_users.png`
-
----
-
-## 🤖 Model Details
-
-### Isolation Forest
-
-* Unsupervised anomaly detection algorithm
-* Detects outliers based on feature isolation
-* Works well for high-dimensional behavioral data
-
-### Features Used
-
-* Total login events per day
-* After-hours activity
-* Number of unique machines used
-* Behavioral ratios (e.g., after-hours ratio)
-
----
-
-## 📈 Example Output
-
-Top suspicious user-day records:
-
-```
-user     day        anomaly_score
-DNS1758  2010-03-13   -0.1339
-BPD2437  2010-03-27   -0.1312
-```
-
----
-
-## ⚠️ Limitations
-
-* No labeled data (unsupervised learning)
-* Psychometric data may be unavailable
-* Model performance depends on feature quality
-
----
-
-## 🚀 Future Improvements
-
-* Add supervised models (if labeled data available)
-* Incorporate additional logs (email, file access)
-* Build a dashboard for visualization
-* Deploy as a web application
-
----
-
-## 🧠 Technologies Used
-
-* Python
-* Pandas
-* Scikit-learn
-* Matplotlib
-
----
-
-## 📜 License
-
-This project is licensed under the MIT License.
-
----
-
-## 👨‍💻 Author
-
-Narender Kumar
-
----
