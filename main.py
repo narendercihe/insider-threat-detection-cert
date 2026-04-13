@@ -1,4 +1,3 @@
-import os
 import json
 import warnings
 import importlib
@@ -20,6 +19,9 @@ from sklearn.metrics import (
 warnings.filterwarnings("ignore")
 
 
+# -----------------------------
+# Paths
+# -----------------------------
 BASE_DIR = Path(__file__).resolve().parent
 RAW_DIR = BASE_DIR / "data" / "raw"
 PROCESSED_DIR = BASE_DIR / "data" / "processed"
@@ -46,6 +48,9 @@ for d in [
     d.mkdir(parents=True, exist_ok=True)
 
 
+# -----------------------------
+# Helpers
+# -----------------------------
 def log(message: str) -> None:
     print(message, flush=True)
 
@@ -79,7 +84,7 @@ def resolve_callable_fuzzy(
             return fn
 
     exclude_keywords = exclude_keywords or []
-    callables = []
+    matches = []
 
     for name in dir(module):
         if name.startswith("_"):
@@ -92,18 +97,21 @@ def resolve_callable_fuzzy(
         if all(k.lower() in lname for k in include_keywords) and not any(
             bad.lower() in lname for bad in exclude_keywords
         ):
-            callables.append((name, obj))
+            matches.append((name, obj))
 
-    if len(callables) == 1:
-        log(f"Auto-detected function in {module_name}: {callables[0][0]}")
-        return callables[0][1]
+    if len(matches) == 1:
+        log(f"Auto-detected function in {module_name}: {matches[0][0]}")
+        return matches[0][1]
 
-    if len(callables) > 1:
-        preferred = sorted(callables, key=lambda x: len(x[0]))[0]
+    if len(matches) > 1:
+        preferred = sorted(matches, key=lambda x: len(x[0]))[0]
         log(f"Auto-detected function in {module_name}: {preferred[0]}")
         return preferred[1]
 
-    available = [name for name in dir(module) if callable(getattr(module, name, None)) and not name.startswith("_")]
+    available = [
+        name for name in dir(module)
+        if callable(getattr(module, name, None)) and not name.startswith("_")
+    ]
     raise AttributeError(
         f"Could not resolve function in {module_name}. "
         f"Tried explicit names: {candidate_names}. "
@@ -137,6 +145,72 @@ def get_numeric_feature_columns(df: pd.DataFrame, label_col: str = "label") -> l
     ]
 
 
+def choose_dataset_input(datasets, fn_name: str):
+    """
+    Route the correct input into a detected function.
+    If the function name is specialized like build_logon_features,
+    pass datasets['logon'] instead of the whole datasets dict.
+    """
+    if not isinstance(datasets, dict):
+        return datasets
+
+    lname = fn_name.lower()
+
+    if "logon" in lname:
+        if "logon" not in datasets:
+            raise KeyError("Expected 'logon' key in datasets dict, but it was not found.")
+        return datasets["logon"]
+
+    if "device" in lname:
+        if "device" not in datasets:
+            raise KeyError("Expected 'device' key in datasets dict, but it was not found.")
+        return datasets["device"]
+
+    if "psychometric" in lname:
+        if "psychometric" not in datasets:
+            raise KeyError("Expected 'psychometric' key in datasets dict, but it was not found.")
+        return datasets["psychometric"]
+
+    return datasets
+
+
+def apply_preprocess(datasets, preprocess_fn):
+    fn_name = preprocess_fn.__name__
+    log(f"Using preprocess function: {fn_name}")
+
+    if not isinstance(datasets, dict):
+        return preprocess_fn(datasets)
+
+    lname = fn_name.lower()
+
+    if "logon" in lname and "logon" in datasets:
+        datasets["logon"] = preprocess_fn(datasets["logon"])
+        return datasets
+
+    if "device" in lname and "device" in datasets:
+        datasets["device"] = preprocess_fn(datasets["device"])
+        return datasets
+
+    if "psychometric" in lname and "psychometric" in datasets:
+        datasets["psychometric"] = preprocess_fn(datasets["psychometric"])
+        return datasets
+
+    return preprocess_fn(datasets)
+
+
+def apply_feature_builder(datasets, build_features_fn):
+    fn_name = build_features_fn.__name__
+    log(f"Using feature function: {fn_name}")
+    feature_input = choose_dataset_input(datasets, fn_name)
+    return build_features_fn(feature_input)
+
+
+def apply_label_builder(feature_df, label_fn):
+    fn_name = label_fn.__name__
+    log(f"Using label function: {fn_name}")
+    return label_fn(feature_df)
+
+
 def normalize_model_output(result, model_name: str) -> dict:
     out = {
         "scores": None,
@@ -159,6 +233,7 @@ def normalize_model_output(result, model_name: str) -> dict:
         if len(result) == 3:
             a, b, c = result
             arr_a = np.asarray(a)
+
             if arr_a.ndim == 1 and set(np.unique(arr_a)).issubset({0, 1}):
                 out["y_pred"], out["scores"], out["model"] = a, b, c
             else:
@@ -233,6 +308,9 @@ def save_predictions_file(
     temp.to_csv(save_path, index=False)
 
 
+# -----------------------------
+# Main pipeline
+# -----------------------------
 def main():
     log("Loading datasets...")
 
@@ -240,72 +318,59 @@ def main():
         "src.data_loader",
         ["load_all_data", "load_data", "load_raw_data"],
         include_keywords=["load"],
+        exclude_keywords=["save", "plot"],
     )
 
     datasets = load_all_data(str(RAW_DIR))
     if datasets is None:
-        raise ValueError("load_all_data() returned None. Please check src/data_loader.py")
+        raise ValueError("Data loader returned None. Check src/data_loader.py")
 
     log("Preprocessing datasets...")
 
     try:
         preprocess_fn = resolve_callable_fuzzy(
             "src.preprocess",
-            ["preprocess_all_data", "preprocess_data", "preprocess_datasets"],
+            [
+                "preprocess_all_data",
+                "preprocess_data",
+                "preprocess_datasets",
+                "preprocess_logon",
+                "preprocess_device",
+                "preprocess_psychometric",
+            ],
             include_keywords=["preprocess"],
+            exclude_keywords=["save", "plot"],
         )
-        datasets = preprocess_fn(datasets)
-    except Exception:
-        pass
+        datasets = apply_preprocess(datasets, preprocess_fn)
+    except Exception as e:
+        log(f"Preprocessing skipped: {e}")
 
     log("Building features...")
 
-features_module = import_module("src.features")
-build_features = resolve_callable_fuzzy(
-    "src.features",
-    [
-        "build_features",
-        "build_feature_table",
-        "build_daily_features",
-        "engineer_features",
-        "create_feature_table",
-        "extract_features",
-        "make_features",
-        "generate_features",
-        "create_features",
-        "prepare_features",
-        "build_user_features",
-        "build_dataset_features",
-        "build_logon_features",
-    ],
-    include_keywords=["feature"],
-    exclude_keywords=["plot", "save", "load", "visual", "chart"],
-)
+    build_features = resolve_callable_fuzzy(
+        "src.features",
+        [
+            "build_features",
+            "build_feature_table",
+            "build_daily_features",
+            "engineer_features",
+            "create_feature_table",
+            "extract_features",
+            "make_features",
+            "generate_features",
+            "create_features",
+            "prepare_features",
+            "build_user_features",
+            "build_dataset_features",
+            "build_logon_features",
+            "build_device_features",
+            "build_psychometric_features",
+        ],
+        include_keywords=["feature"],
+        exclude_keywords=["plot", "save", "load", "visual", "chart"],
+    )
 
-feature_fn_name = build_features.__name__
-log(f"Using feature function: {feature_fn_name}")
-
-if isinstance(datasets, dict):
-    # Route correct dataframe based on function name
-    if "logon" in feature_fn_name.lower():
-        if "logon" not in datasets:
-            raise KeyError("Expected 'logon' key in datasets dict, but it was not found.")
-        feature_input = datasets["logon"]
-    elif "device" in feature_fn_name.lower():
-        if "device" not in datasets:
-            raise KeyError("Expected 'device' key in datasets dict, but it was not found.")
-        feature_input = datasets["device"]
-    elif "psychometric" in feature_fn_name.lower():
-        if "psychometric" not in datasets:
-            raise KeyError("Expected 'psychometric' key in datasets dict, but it was not found.")
-        feature_input = datasets["psychometric"]
-    else:
-        # For general feature builders, pass the full dataset dictionary
-        feature_input = datasets
-else:
-    feature_input = datasets
-
-feature_df = build_features(feature_input)
+    feature_df = apply_feature_builder(datasets, build_features)
 
     if not isinstance(feature_df, pd.DataFrame):
         raise ValueError("Feature builder did not return a pandas DataFrame.")
@@ -327,16 +392,16 @@ feature_df = build_features(feature_input)
             "generate_proxy_labels",
             "assign_proxy_labels",
             "apply_proxy_labels",
-            "make_labels",
             "build_labels",
-            "generate_labels",
             "create_labels",
+            "generate_labels",
+            "make_labels",
         ],
         include_keywords=["label"],
         exclude_keywords=["plot", "save", "load"],
     )
 
-    labeled_df = label_fn(feature_df)
+    labeled_df = apply_label_builder(feature_df, label_fn)
 
     if not isinstance(labeled_df, pd.DataFrame):
         raise ValueError("Label builder did not return a pandas DataFrame.")
@@ -354,6 +419,9 @@ feature_df = build_features(feature_input)
     y_true = labeled_df["label"].astype(int).values
     results_summary = []
 
+    # -------------------------
+    # Isolation Forest
+    # -------------------------
     log("Training Isolation Forest...")
 
     train_iforest = resolve_callable_fuzzy(
@@ -369,7 +437,11 @@ feature_df = build_features(feature_input)
         exclude_keywords=["plot", "save", "load"],
     )
 
-    iforest_result = train_iforest(labeled_df, feature_cols=feature_cols, label_col="label")
+    iforest_result = train_iforest(
+        labeled_df,
+        feature_cols=feature_cols,
+        label_col="label",
+    )
     iforest_out = normalize_model_output(iforest_result, "Isolation Forest")
     iforest_y_pred = np.asarray(iforest_out["y_pred"]).astype(int)
 
@@ -406,6 +478,9 @@ feature_df = build_features(feature_input)
     with open(TABLES_DIR / "iforest_metrics.json", "w") as f:
         json.dump(iforest_metrics, f, indent=2)
 
+    # -------------------------
+    # Autoencoder
+    # -------------------------
     log("Training Autoencoder...")
 
     train_ae = resolve_callable_fuzzy(
@@ -460,6 +535,9 @@ feature_df = build_features(feature_input)
     with open(TABLES_DIR / "autoencoder_metrics.json", "w") as f:
         json.dump(ae_metrics, f, indent=2)
 
+    # -------------------------
+    # VAE
+    # -------------------------
     log("Training VAE...")
 
     train_vae = resolve_callable("src.vae_model", ["train_vae"])
@@ -503,6 +581,9 @@ feature_df = build_features(feature_input)
     with open(TABLES_DIR / "vae_metrics.json", "w") as f:
         json.dump(vae_metrics, f, indent=2)
 
+    # -------------------------
+    # Final comparison
+    # -------------------------
     comparison_df = pd.DataFrame(results_summary)
     comparison_df = comparison_df[
         ["model", "accuracy", "precision", "recall", "f1", "threshold"]
@@ -511,11 +592,12 @@ feature_df = build_features(feature_input)
     comparison_csv_path = TABLES_DIR / "model_comparison.csv"
     comparison_df.to_csv(comparison_csv_path, index=False)
 
+    comparison_xlsx_path = None
     try:
         comparison_xlsx_path = TABLES_DIR / "model_comparison.xlsx"
         comparison_df.to_excel(comparison_xlsx_path, index=False)
     except Exception:
-        comparison_xlsx_path = None
+        pass
 
     save_metric_comparison_plot(
         comparison_df,
@@ -526,7 +608,7 @@ feature_df = build_features(feature_input)
     log(f"Feature table: {feature_table_path}")
     log(f"Labeled feature table: {labeled_feature_table_path}")
     log(f"Comparison CSV: {comparison_csv_path}")
-    if comparison_xlsx_path:
+    if comparison_xlsx_path is not None:
         log(f"Comparison Excel: {comparison_xlsx_path}")
     log(f"Figures folder: {FIGURES_DIR}")
     log(f"Predictions folder: {PREDICTIONS_DIR}")
