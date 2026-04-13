@@ -11,11 +11,15 @@ from tensorflow import keras
 from tensorflow.keras import layers
 
 
+@keras.utils.register_keras_serializable()
 class Sampling(layers.Layer):
     def call(self, inputs):
         z_mean, z_log_var = inputs
         epsilon = tf.random.normal(shape=tf.shape(z_mean))
         return z_mean + tf.exp(0.5 * z_log_var) * epsilon
+
+    def get_config(self):
+        return super().get_config()
 
 
 class VAE(keras.Model):
@@ -155,9 +159,10 @@ def train_vae(
         "confusion_matrix": confusion_matrix(y, y_pred).tolist(),
     }
 
-    vae.save(os.path.join(model_dir, "vae_model.keras"))
+    # Save only serializable/useful artifacts
     encoder.save(os.path.join(model_dir, "encoder.keras"))
     decoder.save(os.path.join(model_dir, "decoder.keras"))
+    vae.save_weights(os.path.join(model_dir, "vae_weights.weights.h5"))
     joblib.dump(feature_cols, os.path.join(model_dir, "feature_cols.pkl"))
 
     with open(os.path.join(model_dir, "metrics.json"), "w") as f:
