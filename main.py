@@ -141,7 +141,7 @@ def main():
     datasets = load_all_data(RAW_DIR)
 
     # -----------------------------
-    # Preprocess
+    # Preprocess (exclude large files)
     # -----------------------------
     log("Preprocessing datasets...")
     logon_df = preprocess_logon(datasets["logon"])
@@ -150,7 +150,7 @@ def main():
     users_df = preprocess_users(datasets.get("users"))
 
     # -----------------------------
-    # Build features
+    # Build features (exclude large files)
     # -----------------------------
     log("Building features...")
     logon_features = build_logon_features(logon_df)
