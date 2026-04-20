@@ -25,6 +25,8 @@ The system is designed to detect:
 This project uses the **CERT Insider Threat Dataset**, specifically:
 - `logon.csv` → user login/logout activity
 - `device.csv` → device used for login
+- `users.csv`: User information
+- `psychometric.csv`: Psychometric data
 - `file.csv` → file access logs
 - `http.csv` → web access logs
 - `email.csv` (optional) → email logs
